@@ -181,6 +181,10 @@ inputs.click("left", bulkDestroy, "in-game");
 
 // unsure where holdingBlockType equivilent is located
 
+// Toggle to use custom 64x64 skin system
+// Set to true to load skins from assets/skins/default.png, false for default character appearance
+const USE_CUSTOM_64_64_SKIN = false;
+
 const HOTBAR_CONTENT = [0, 1, 5, 20, 50000, 13131, 45, 300, 1000, 500];
 const bar = new VOXELIZE.ItemSlots({
   verticalCount: 1,
@@ -284,18 +288,24 @@ inputs.click(
 );
 
 // Add a character to the control
-world.loader.loadTexture(LolImage, (texture) => {
-  character.head.paint("front", texture);
-});
 const createCharacter = () => {
   const character = new VOXELIZE.Character();
   world.add(character);
   lightShined.add(character);
   shadows.add(character);
 
-  world.loader.load().then(() => {
-    character.head.paint("front", world.loader.getTexture(LolImage));
-  });
+  // Apply custom skin if enabled
+  if (USE_CUSTOM_64_64_SKIN) {
+    loadSkin(DefaultSkin)
+      .then((skinTextures) => {
+        applySkin(character, skinTextures);
+      })
+      .catch((error) => {
+        console.error("Failed to load custom skin:", error);
+        console.log("Falling back to default character appearance");
+      });
+  }
+  // Otherwise use default character appearance (no custom textures applied)
 
   return character;
 };
@@ -623,8 +633,11 @@ import {
 } from "postprocessing";
 
 import LolImage from "./assets/lol.png";
+import DefaultSkin from "./assets/skins/default.png";
 import { Map } from "./map";
 import { BOT_HEAD_COLOR, BOT_HEAD_FRONT_COLOR, BOT_SCALE } from "./config/constants";
+import { loadSkin } from "./skinLoader";
+import { applySkin } from "./applySkin";
 
 const BACKEND_SERVER_INSTANCE = new URL(window.location.href);
 const VOXELIZE_LOCALSTORAGE_KEY = "voxelize-world";
