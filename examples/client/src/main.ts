@@ -304,8 +304,12 @@ const createCharacter = () => {
         console.error("Failed to load custom skin:", error);
         console.log("Falling back to default character appearance");
       });
+  } else {
+    // Use default lol.png texture on head
+    world.loader.load().then(() => {
+      character.head.paint("front", world.loader.getTexture(LolImage));
+    });
   }
-  // Otherwise use default character appearance (no custom textures applied)
 
   return character;
 };
