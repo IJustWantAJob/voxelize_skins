@@ -95,35 +95,43 @@ impl Registry {
     pub fn generate(&mut self) {
         let all_blocks = self.blocks_by_id.values_mut().collect::<Vec<_>>();
 
-        let mut total_faces = 0;
+        let mut texture_groups: HashSet<String> = HashSet::new();
+        let mut ungrouped_faces = 0;
+
         for block in all_blocks.iter() {
-            let mut block_total_faces = block.faces.len();
-
-            block.faces.iter().for_each(|face| {
+            for face in block.faces.iter() {
                 if face.independent || face.isolated {
-                    block_total_faces -= 1;
+                    continue;
                 }
-            });
 
-            total_faces += block_total_faces;
+                if let Some(group) = &face.texture_group {
+                    texture_groups.insert(group.clone());
+                } else {
+                    ungrouped_faces += 1;
+                }
+            }
         }
 
-        if total_faces == 0 {
+        let total_slots = texture_groups.len() + ungrouped_faces;
+
+        if total_slots == 0 {
             return;
         }
 
         let mut count_per_side = 1.0;
-        let sqrt = (total_faces as f32).sqrt().ceil();
+        let sqrt = (total_slots as f32).sqrt().ceil();
         while count_per_side < sqrt {
             count_per_side *= 2.0;
         }
 
         let count_per_side = count_per_side as usize;
+        let offset = 1.0 / (count_per_side as f32 * 4.0);
 
+        let mut group_uvs: HashMap<String, UV> = HashMap::new();
         let mut row = 0;
         let mut col = 0;
 
-        let mut run_face = |face: &mut BlockFace| {
+        let mut allocate_slot = || {
             if col >= count_per_side {
                 col = 0;
                 row += 1;
@@ -132,28 +140,24 @@ impl Registry {
             let start_x = col as f32;
             let start_y = row as f32;
 
-            let offset = 1.0 / (count_per_side as f32 * 4.0);
+            let start_u = start_x / count_per_side as f32 + offset;
+            let end_u = (start_x + 1.0) / count_per_side as f32 - offset;
+            let start_v = start_y / count_per_side as f32 + offset;
+            let end_v = (start_y + 1.0) / count_per_side as f32 - offset;
 
-            let start_u = start_x / count_per_side as f32;
-            let end_u = (start_x + 1.0) / count_per_side as f32;
-            let start_v = start_y / count_per_side as f32;
-            let end_v = (start_y + 1.0) / count_per_side as f32;
+            col += 1;
 
-            // Texture bleeding fix.
-            let start_u = start_u + offset;
-            let end_u = end_u - offset;
-            let start_v = start_v + offset;
-            let end_v = end_v - offset;
-
-            face.range = UV {
+            UV {
                 start_u,
                 end_u,
                 start_v,
                 end_v,
-            };
-
-            col += 1;
+            }
         };
+
+        for group in &texture_groups {
+            group_uvs.insert(group.clone(), allocate_slot());
+        }
 
         for block in all_blocks {
             for face in block.faces.iter_mut() {
@@ -161,16 +165,23 @@ impl Registry {
                     continue;
                 }
 
-                run_face(face);
+                if let Some(group) = &face.texture_group {
+                    if let Some(uv) = group_uvs.get(group) {
+                        face.range = uv.clone();
+                    }
+                } else {
+                    face.range = allocate_slot();
+                }
             }
 
             if let Some(dynamic_patterns) = block.dynamic_patterns.as_mut() {
                 for pattern in dynamic_patterns {
                     for part in &mut pattern.parts {
                         for face in &mut part.faces {
-                            let existing = block.faces.iter_mut().find(|f| f.name == face.name);
+                            let existing = block.faces.iter().find(|f| f.name == face.name);
                             if let Some(e) = existing {
                                 face.range = e.range.clone();
+                                face.texture_group = e.texture_group.clone();
                             }
                         }
                     }
@@ -227,11 +238,11 @@ impl Registry {
             .unwrap_or_else(|| panic!("Block name not found: {name}",))
     }
 
-    /// Get a block reference by block ID.
+    /// Get a block reference by block ID. Returns Air if block ID not found.
     pub fn get_block_by_id(&self, id: u32) -> &Block {
         self.blocks_by_id
             .get(&id)
-            .unwrap_or_else(|| panic!("Block id not found: {id}"))
+            .unwrap_or_else(|| self.blocks_by_id.get(&0).expect("Air block must exist"))
     }
 
     /// Get a block id by block name.
@@ -350,5 +361,15 @@ impl Registry {
         for (idx, side) in faces.iter().enumerate() {
             self.textures.insert((*id, idx, side.independent));
         }
+    }
+
+    pub fn to_mesher_registry(&self) -> voxelize_mesher::Registry {
+        let blocks_by_id: Vec<(u32, voxelize_mesher::Block)> = self
+            .blocks_by_id
+            .iter()
+            .map(|(id, block)| (*id, block.to_mesher_block()))
+            .collect();
+
+        voxelize_mesher::Registry::new(blocks_by_id)
     }
 }

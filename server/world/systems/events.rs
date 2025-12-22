@@ -3,8 +3,10 @@ use serde_json::Value;
 use specs::{Entity, ReadExpect, ReadStorage, System, WriteExpect};
 
 use crate::{
-    encode_message, ChunkInterests, ChunkRequestsComp, ClientFilter, Clients, EncodedMessage,
-    Event, EventProtocol, Events, IDComp, Message, MessageType, Transports, Vec2,
+    encode_message,
+    world::metadata::WorldMetadata,
+    ChunkInterests, ChunkRequestsComp, ClientFilter, Clients, Event, EventProtocol,
+    Events, IDComp, Message, MessageType, Transports, Vec2,
 };
 
 pub struct EventsSystem;
@@ -14,13 +16,14 @@ impl<'a> System<'a> for EventsSystem {
         ReadExpect<'a, Transports>,
         ReadExpect<'a, Clients>,
         ReadExpect<'a, ChunkInterests>,
+        ReadExpect<'a, WorldMetadata>,
         WriteExpect<'a, Events>,
         ReadStorage<'a, IDComp>,
         ReadStorage<'a, ChunkRequestsComp>,
     );
 
     fn run(&mut self, data: Self::SystemData) {
-        let (transports, clients, interests, mut events, ids, requests) = data;
+        let (transports, clients, interests, world_metadata, mut events, ids, requests) = data;
 
         if events.queue.is_empty() {
             return;
@@ -133,17 +136,20 @@ impl<'a> System<'a> for EventsSystem {
 
             let client = client.unwrap();
             let message = Message::new(&MessageType::Event).events(&events).build();
-            let encoded = EncodedMessage(encode_message(&message));
+            let encoded = encode_message(&message);
 
-            client.addr.do_send(encoded);
+            let _ = client.sender.send(encoded);
         });
 
         if !transports.is_empty() {
             let message = Message::new(&MessageType::Event)
+                .world_name(&world_metadata.world_name)
                 .events(&transports_map)
                 .build();
-            let encoded = EncodedMessage(encode_message(&message));
-            transports.values().for_each(|r| r.do_send(encoded.clone()));
+            let encoded = encode_message(&message);
+            transports.values().for_each(|sender| {
+                let _ = sender.send(encoded.clone());
+            });
         }
     }
 }

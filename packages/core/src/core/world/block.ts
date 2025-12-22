@@ -90,6 +90,16 @@ export type Block = {
   isFluid: boolean;
 
   /**
+   * The force applied to entities in this fluid, pushing them in the flow direction.
+   */
+  fluidFlowForce: number;
+
+  /**
+   * Whether or not is the block waterlogged (exists inside water).
+   */
+  isWaterlogged: boolean;
+
+  /**
    * Whether or not is this block a light source.
    */
   isLight: boolean;
@@ -130,6 +140,7 @@ export type Block = {
     dir: [number, number, number];
     independent: boolean;
     isolated: boolean;
+    textureGroup: string | null;
     range: UV;
     name: string;
   }[];
@@ -402,6 +413,10 @@ export class BlockRotation {
    * @returns A new axis aligned bounding box.
    */
   public rotateAABB = (aabb: AABB, yRotate = true, translate = true) => {
+    if (this.value === PY_ROTATION && (this.yRotation === 0 || !yRotate)) {
+      return aabb.clone();
+    }
+
     const min = [aabb.minX, aabb.minY, aabb.minZ] as Coords3;
     const max = [aabb.maxX, aabb.maxY, aabb.maxZ] as Coords3;
 

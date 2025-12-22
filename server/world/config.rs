@@ -97,6 +97,9 @@ pub struct WorldConfig {
 
     /// Whether entities should be saved. Only applies if `saving` is true.
     pub save_entities: bool,
+
+    /// Whether to use greedy meshing for chunk generation. Default is true.
+    pub greedy_meshing: bool,
 }
 
 impl Default for WorldConfig {
@@ -126,8 +129,8 @@ const DEFAULT_PRELOAD_RADIUS: usize = 8;
 const DEFAULT_MAX_HEIGHT: usize = 256;
 const DEFAULT_MAX_LIGHT_LEVEL: u32 = 15;
 const DEFAULT_MAX_CHUNKS_PER_TICK: usize = 4;
-const DEFAULT_MAX_UPDATES_PER_TICK: usize = 500;
-const DEFAULT_MAX_RESPONSE_PER_TICK: usize = 3;
+const DEFAULT_MAX_UPDATES_PER_TICK: usize = 2000;
+const DEFAULT_MAX_RESPONSE_PER_TICK: usize = 4;
 const DEFAULT_MAX_SAVES_PER_TICK: usize = 2;
 const DEFAULT_TICKS_PER_DAY: u64 = 24000;
 const DEFAULT_WATER_LEVEL: usize = 86;
@@ -145,6 +148,7 @@ const DEFAULT_SAVING: bool = false;
 const DEFAULT_SAVE_DIR: &str = "";
 const DEFAULT_SAVE_INTERVAL: usize = 300;
 const DEFAULT_COMMAND_SYMBOL: &str = "/";
+const DEFAULT_GREEDY_MESHING: bool = true;
 
 /// Builder for a world configuration.
 pub struct WorldConfigBuilder {
@@ -179,6 +183,7 @@ pub struct WorldConfigBuilder {
     save_interval: usize,
     command_symbol: String,
     save_entities: bool,
+    greedy_meshing: bool,
 }
 
 impl WorldConfigBuilder {
@@ -216,6 +221,7 @@ impl WorldConfigBuilder {
             terrain: NoiseOptions::default(),
             command_symbol: DEFAULT_COMMAND_SYMBOL.to_owned(),
             save_entities: true,
+            greedy_meshing: DEFAULT_GREEDY_MESHING,
         }
     }
 
@@ -382,6 +388,12 @@ impl WorldConfigBuilder {
         self
     }
 
+    /// Configure whether to use greedy meshing for chunk generation. Default is true.
+    pub fn greedy_meshing(mut self, greedy_meshing: bool) -> Self {
+        self.greedy_meshing = greedy_meshing;
+        self
+    }
+
     /// Create a world configuration.
     pub fn build(self) -> WorldConfig {
         // Make sure there are still chunks in the world.
@@ -429,6 +441,7 @@ impl WorldConfigBuilder {
             save_interval: self.save_interval,
             command_symbol: self.command_symbol,
             save_entities: self.save_entities,
+            greedy_meshing: self.greedy_meshing,
         }
     }
 }

@@ -5,8 +5,10 @@ use libflate::zlib::{Decoder, Encoder};
 use log::info;
 use serde::{Deserialize, Serialize};
 use specs::Entity;
+use std::sync::Arc;
 use std::{
-    collections::VecDeque,
+    cmp::Reverse,
+    collections::{BinaryHeap, VecDeque},
     fs::{self, File},
     io::{BufReader, Read, Write},
     path::PathBuf,
@@ -22,6 +24,24 @@ use super::{
     chunk::Chunk,
     space::{SpaceBuilder, SpaceOptions},
 };
+
+#[derive(Eq, PartialEq, Clone)]
+pub struct ActiveVoxel {
+    pub tick: u64,
+    pub voxel: Vec3<i32>,
+}
+
+impl Ord for ActiveVoxel {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tick.cmp(&other.tick)
+    }
+}
+
+impl PartialOrd for ActiveVoxel {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// Prototype for chunk's internal data used to send to client
 #[derive(Serialize, Deserialize)]
@@ -41,13 +61,17 @@ pub struct Chunks {
     /// Voxel updates waiting to be processed.
     pub(crate) updates: VecDeque<VoxelUpdate>,
 
+    /// Staging area for new voxel updates (deduplicates before flushing to queue).
+    pub(crate) updates_staging: HashMap<Vec3<i32>, u32>,
+
     /// A list of chunks that are done meshing and ready to be sent.
     pub(crate) to_send: VecDeque<(Vec2<i32>, MessageType)>,
 
     /// A list of chunks that are done meshing and ready to be saved, if `config.save` is true.
     pub(crate) to_save: VecDeque<Vec2<i32>>,
 
-    pub(crate) active_voxels: Vec<(u64, Vec3<i32>)>,
+    pub(crate) active_voxel_heap: BinaryHeap<Reverse<ActiveVoxel>>,
+    pub(crate) active_voxel_set: HashMap<Vec3<i32>, u64>,
 
     /// A listener for when a chunk is done generating or meshing.
     pub(crate) listeners: HashMap<Vec2<i32>, Vec<Vec2<i32>>>,
@@ -134,10 +158,10 @@ impl Chunks {
             },
         );
 
-        chunk.voxels.data = voxels;
+        Arc::make_mut(&mut chunk.voxels).data = voxels;
 
         if height_map.len() > 0 {
-            chunk.height_map.data = height_map;
+            Arc::make_mut(&mut chunk.height_map).data = height_map;
         } else {
             chunk.calculate_max_height(registry);
         }
@@ -147,7 +171,6 @@ impl Chunks {
         Some(chunk)
     }
 
-    // Save a certain chunk.
     pub fn save(&self, coords: &Vec2<i32>) -> bool {
         if !self.config.saving {
             panic!("Calling `chunks.save` when saving mode is not on.");
@@ -160,7 +183,7 @@ impl Chunks {
         };
 
         let path = self.get_chunk_file_path(&chunk.name);
-        let mut file = File::create(&path).expect("Could not create chunk file.");
+        let tmp_path = path.with_extension("json.tmp");
 
         let to_base_64 = |data: &Vec<u32>| {
             let mut bytes = vec![0; data.len() * 4];
@@ -178,10 +201,32 @@ impl Chunks {
             height_map: to_base_64(&chunk.height_map.data),
         };
 
-        let j = serde_json::to_string(&data).unwrap();
+        let j = match serde_json::to_string(&data) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
 
-        file.write_all(j.as_bytes())
-            .expect("Unable to write to chunk file.");
+        let mut file = match File::create(&tmp_path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        if file.write_all(j.as_bytes()).is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            return false;
+        }
+
+        if file.sync_all().is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            return false;
+        }
+
+        drop(file);
+
+        if fs::rename(&tmp_path, &path).is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            return false;
+        }
 
         true
     }
@@ -370,10 +415,21 @@ impl Chunks {
     /// and sending the chunk to the interested clients. This process is not instant, and will
     /// be done in the background.
     pub fn update_voxel(&mut self, voxel: &Vec3<i32>, val: u32) {
-        self.updates
-            .retain(|(v, _)| !(v.0 == voxel.0 && v.1 == voxel.1 && v.2 == voxel.2));
+        self.updates_staging.insert(voxel.to_owned(), val);
+    }
 
-        self.updates.push_back((voxel.to_owned(), val));
+    /// Flush staged updates into the processing queue. Called before processing updates.
+    pub fn flush_staged_updates(&mut self) {
+        if self.updates_staging.is_empty() {
+            return;
+        }
+
+        self.updates
+            .retain(|(v, _)| !self.updates_staging.contains_key(v));
+
+        for (voxel, val) in self.updates_staging.drain() {
+            self.updates.push_back((voxel, val));
+        }
     }
 
     pub fn update_voxels(&mut self, voxels: &[(Vec3<i32>, u32)]) {
@@ -383,12 +439,14 @@ impl Chunks {
     }
 
     pub fn mark_voxel_active(&mut self, voxel: &Vec3<i32>, active_at: u64) {
-        if let Some(_) = self.active_voxels.iter().find(|(_, v)| v == voxel) {
-            self.active_voxels
-                .retain(|(_, v)| !(v.0 == voxel.0 && v.1 == voxel.1 && v.2 == voxel.2));
+        if self.active_voxel_set.contains_key(voxel) {
+            return;
         }
-
-        self.active_voxels.push((active_at, voxel.to_owned()));
+        self.active_voxel_set.insert(voxel.clone(), active_at);
+        self.active_voxel_heap.push(Reverse(ActiveVoxel {
+            tick: active_at,
+            voxel: voxel.clone(),
+        }));
     }
 
     /// Add a chunk to be saved.
@@ -409,6 +467,9 @@ impl Chunks {
         r#type: &MessageType,
         prioritized: bool,
     ) {
+        if self.to_send.iter().any(|(c, _)| c == coords) {
+            return;
+        }
         if prioritized {
             self.to_send.push_front((coords.to_owned(), r#type.clone()));
         } else {

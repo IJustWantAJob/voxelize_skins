@@ -43,7 +43,7 @@ interface VoxelAccess {
 }
 
 class BoundedSpace implements VoxelAccess {
-  private chunkCache = new Map<string, RawChunk | null>();
+  private chunkCache = new Map<number, RawChunk | null>();
   private modifiedChunks = new Set<RawChunk>();
 
   constructor(
@@ -54,6 +54,10 @@ class BoundedSpace implements VoxelAccess {
     private gridOffsetZ: number,
     private chunkSize: number
   ) {}
+
+  private hashChunkCoords(cx: number, cz: number): number {
+    return ((cx * 73856093) ^ (cz * 83492791)) >>> 0;
+  }
 
   private getChunkByCoords(cx: number, cz: number): RawChunk | null {
     const localX = cx - this.gridOffsetX;
@@ -72,7 +76,7 @@ class BoundedSpace implements VoxelAccess {
   }
 
   private getCachedChunk(cx: number, cz: number): RawChunk | null {
-    const key = `${cx},${cz}`;
+    const key = this.hashChunkCoords(cx, cz);
     let chunk = this.chunkCache.get(key);
     if (chunk === undefined) {
       chunk = this.getChunkByCoords(cx, cz);
@@ -167,11 +171,15 @@ function floodLight(
 
   const isSunlight = color === "SUNLIGHT";
 
-  const blockCache = new Map<string, Block>();
-  const rotationCache = new Map<string, BlockRotation>();
+  const blockCache = new Map<number, Block>();
+  const rotationCache = new Map<number, BlockRotation>();
+
+  const hashCoords = (vx: number, vy: number, vz: number): number => {
+    return ((vx * 73856093) ^ (vy * 19349663) ^ (vz * 83492791)) >>> 0;
+  };
 
   const getCachedBlock = (vx: number, vy: number, vz: number): Block => {
-    const key = `${vx},${vy},${vz}`;
+    const key = hashCoords(vx, vy, vz);
     let block = blockCache.get(key);
     if (!block) {
       const id = space.getVoxelAt(vx, vy, vz);
@@ -186,7 +194,7 @@ function floodLight(
     vy: number,
     vz: number
   ): BlockRotation => {
-    const key = `${vx},${vy},${vz}`;
+    const key = hashCoords(vx, vy, vz);
     let rotation = rotationCache.get(key);
     if (!rotation) {
       rotation = space.getVoxelRotationAt(vx, vy, vz);
@@ -195,11 +203,8 @@ function floodLight(
     return rotation;
   };
 
-  while (queue.length) {
-    const node = queue.shift();
-    if (!node) break;
-
-    const { voxel, level } = node;
+  for (let i = 0; i < queue.length; i++) {
+    const { voxel, level } = queue[i];
 
     if (level === 0) {
       continue;
@@ -243,14 +248,19 @@ function floodLight(
         nBlock,
         nRotation
       );
-      const nextLevel =
-        level -
-        (isSunlight &&
+      const reduce =
+        isSunlight &&
         !nBlock.lightReduce &&
         oy === -1 &&
         level === maxLightLevel
           ? 0
-          : 1);
+          : 1;
+
+      if (level <= reduce) {
+        continue;
+      }
+
+      const nextLevel = level - reduce;
 
       if (
         !LightUtils.canEnter(sourceTransparency, nTransparency, ox, oy, oz) ||
@@ -299,11 +309,8 @@ function removeLight(
     space.setTorchLightAt(vx, vy, vz, 0, color);
   }
 
-  while (queue.length) {
-    const node = queue.shift();
-    if (!node) break;
-
-    const { voxel, level } = node;
+  for (let i = 0; i < queue.length; i++) {
+    const { voxel, level } = queue[i];
     const [vx, vy, vz] = voxel;
 
     for (const [ox, oy, oz] of VOXEL_NEIGHBORS) {
@@ -394,11 +401,8 @@ function removeLightsBatch(
     }
   });
 
-  while (queue.length) {
-    const node = queue.shift();
-    if (!node) break;
-
-    const { voxel, level } = node;
+  for (let i = 0; i < queue.length; i++) {
+    const { voxel, level } = queue[i];
     const [vx, vy, vz] = voxel;
 
     for (const [ox, oy, oz] of VOXEL_NEIGHBORS) {
