@@ -183,7 +183,7 @@ inputs.click("left", bulkDestroy, "in-game");
 
 // Toggle to use custom 64x64 skin system
 // Set to true to load skins from assets/skins/default.png, false for default character appearance
-const USE_CUSTOM_64_64_SKIN = false;
+const USE_CUSTOM_64_64_SKIN = true;
 
 const HOTBAR_CONTENT = [0, 1, 5, 20, 50000, 13131, 45, 300, 1000, 500];
 const bar = new VOXELIZE.ItemSlots({
