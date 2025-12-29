@@ -108,20 +108,19 @@ export class WorkerPool {
 
       const { message, buffers, resolve } = this.queue.shift() as WorkerPoolJob;
 
-      worker.postMessage(message, buffers);
-      WorkerPool.WORKING_COUNT++;
-
       const workerCallback = ({ data }: any) => {
         WorkerPool.WORKING_COUNT--;
         worker.removeEventListener("message", workerCallback);
         this.available.unshift(index);
         resolve(data);
         if (this.queue.length > 0) {
-          setTimeout(this.process, 0);
+          queueMicrotask(this.process);
         }
       };
 
       worker.addEventListener("message", workerCallback);
+      worker.postMessage(message, buffers);
+      WorkerPool.WORKING_COUNT++;
     }
   };
 
@@ -137,5 +136,12 @@ export class WorkerPool {
    */
   get workingCount() {
     return this.workers.length - this.available.length;
+  }
+
+  /**
+   * The number of workers that are available to take jobs.
+   */
+  get availableCount() {
+    return this.available.length;
   }
 }

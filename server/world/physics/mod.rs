@@ -363,8 +363,8 @@ impl Physics {
         body: &mut RigidBody,
     ) {
         let aabb = &body.aabb;
-        let cx = aabb.min_x.floor() as i32;
-        let cz = aabb.min_z.floor() as i32;
+        let center_x = ((aabb.min_x + aabb.max_x) / 2.0).floor() as i32;
+        let center_z = ((aabb.min_z + aabb.max_z) / 2.0).floor() as i32;
         let y0 = aabb.min_y.floor() as i32;
         let y1 = aabb.max_y.floor() as i32;
 
@@ -374,17 +374,19 @@ impl Physics {
             block.is_fluid
         };
 
-        if !test_fluid(cx, y0, cz) {
+        if !test_fluid(center_x, y0, center_z) {
             body.in_fluid = false;
             body.ratio_in_fluid = 0.0;
             return;
         }
 
+        body.in_fluid = true;
+
         // body is in fluid - find out how much body is submerged
         let mut submerged = 1;
         let mut cy = y0 + 1;
 
-        while cy <= y1 && test_fluid(cx, cy, cz) {
+        while cy <= y1 && test_fluid(center_x, cy, center_z) {
             submerged += 1;
             cy += 1;
         }
@@ -395,16 +397,53 @@ impl Physics {
         if ratio_in_fluid > 1.0 {
             ratio_in_fluid = 1.0;
         }
+
+        body.ratio_in_fluid = ratio_in_fluid;
+
         let vol = aabb.width() * aabb.height() * aabb.depth();
         let displaced = vol * ratio_in_fluid;
 
         // buoyant force = -gravity * fluid_density * volume_displaced
         let scalar = config.fluid_density * displaced;
+
         body.apply_force(
-            config.gravity[0] * scalar,
-            config.gravity[1] * scalar,
-            config.gravity[2] * scalar,
+            -config.gravity[0] * scalar,
+            -config.gravity[1] * scalar,
+            -config.gravity[2] * scalar,
         );
+
+        let fluid_id = space.get_voxel(center_x, y0, center_z);
+        let fluid_block = registry.get_block_by_id(fluid_id);
+        let fluid_flow_force = fluid_block.fluid_flow_force;
+
+        if fluid_flow_force > 0.0 {
+            let current_stage = space.get_voxel_stage(center_x, y0, center_z);
+            let mut flow_dir_x = 0.0_f32;
+            let mut flow_dir_z = 0.0_f32;
+
+            let neighbors: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+            for (dx, dz) in neighbors {
+                let nx = center_x + dx;
+                let nz = center_z + dz;
+                if test_fluid(nx, y0, nz) {
+                    let neighbor_stage = space.get_voxel_stage(nx, y0, nz);
+                    if neighbor_stage > current_stage {
+                        flow_dir_x += dx as f32;
+                        flow_dir_z += dz as f32;
+                    }
+                }
+            }
+
+            let flow_len = (flow_dir_x * flow_dir_x + flow_dir_z * flow_dir_z).sqrt();
+            if flow_len > 0.0 {
+                flow_dir_x /= flow_len;
+                flow_dir_z /= flow_len;
+                let effective_ratio = ratio_in_fluid.max(0.3);
+                let force_mag = fluid_flow_force * effective_ratio;
+                body.apply_force(flow_dir_x * force_mag, 0.0, flow_dir_z * force_mag);
+            }
+        }
     }
 
     fn apply_climbable_forces(space: &dyn VoxelAccess, registry: &Registry, body: &mut RigidBody) {
@@ -469,7 +508,9 @@ impl Physics {
         //        dvF = dt * Ff / m
         //            = dt * (u * m * dvnormal / dt) / m
         //            = u * dvnormal
-        let dv_max = (body.friction * v_normal).abs();
+        // reduce friction when in fluid to allow water current to push
+        let fluid_friction_mult = if body.in_fluid { 0.1 } else { 1.0 };
+        let dv_max = (body.friction * fluid_friction_mult * v_normal).abs();
 
         // decrease lateral vel by dv_max (or clamp to zero)
         let scalar = if v_curr > dv_max {
@@ -609,8 +650,8 @@ impl Physics {
         // }
 
         // if the new position is below the old position, then the new position is invalid
-        // since we trying to step upwards
-        if old_aabb.min_y < body.aabb.min_y {
+        // since we're trying to step upwards
+        if old_aabb.min_y > body.aabb.min_y {
             return;
         }
 

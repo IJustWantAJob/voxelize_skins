@@ -76,7 +76,7 @@ impl ChunkStage for BiomeStage {
 
         for vx in min_x..max_x {
             for vz in min_z..max_z {
-                let biome = self.biomes.query(vx, vz);
+                let biome: &Biome = self.biomes.query(vx, vz);
                 let block = registry.get_block_by_name(&biome.block);
                 let block_id = block.id;
 

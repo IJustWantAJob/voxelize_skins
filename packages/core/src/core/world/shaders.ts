@@ -11,8 +11,11 @@ export const DEFAULT_CHUNK_SHADERS = {
 attribute int light;
 
 varying float vAO;
+varying float vIsFluid;
+varying float vIsGreedy;
 varying vec4 vLight;
 varying vec4 vWorldPosition;
+varying vec3 vWorldNormal;
 uniform vec4 uAOTable;
 uniform float uTime;
 
@@ -34,9 +37,13 @@ vec4 unpackLight(int l) {
       `
 #include <color_vertex>
 
-int ao = light >> 16;
+int ao = (light >> 16) & 0x3;
+int isFluid = (light >> 18) & 0x1;
+int isGreedy = (light >> 19) & 0x1;
 
 vAO = uAOTable[ao] / 255.0;
+vIsFluid = float(isFluid);
+vIsGreedy = float(isGreedy);
 
 vLight = unpackLight(light & 0xFFFF);
 `
@@ -50,6 +57,7 @@ vec4 worldPosition = vec4( transformed, 1.0 );
 #endif
 worldPosition = modelMatrix * worldPosition;
 vWorldPosition = worldPosition;
+vWorldNormal = normalize(mat3(modelMatrix) * normal);
 `
     ),
   fragment: ShaderLib.basic.fragmentShader
@@ -63,11 +71,74 @@ uniform float uSunlightIntensity;
 uniform float uMinLightLevel;
 uniform float uLightIntensityAdjustment;
 uniform float uTime;
+uniform float uAtlasSize;
+uniform float uShowGreedyDebug;
 varying float vAO;
+varying float vIsFluid;
+varying float vIsGreedy;
 varying vec4 vLight; 
 varying vec4 vWorldPosition;
+varying vec3 vWorldNormal;
 
 #include <common>
+`
+    )
+    .replace(
+      "#include <map_fragment>",
+      `
+#ifdef USE_MAP
+  vec2 finalUv;
+  
+  if (vIsGreedy > 0.5) {
+    float cellSize = 1.0 / uAtlasSize;
+    float padding = cellSize / 4.0;
+    
+    vec3 absNormal = abs(vWorldNormal);
+    vec2 localUv;
+    if (absNormal.y > 0.5) {
+      if (vWorldNormal.y > 0.0) {
+        localUv = vec2(1.0 - fract(vWorldPosition.x), fract(vWorldPosition.z));
+      } else {
+        localUv = vec2(fract(vWorldPosition.x), 1.0 - fract(vWorldPosition.z));
+      }
+    } else if (absNormal.x > 0.5) {
+      if (vWorldNormal.x > 0.0) {
+        localUv = vec2(1.0 - fract(vWorldPosition.z), fract(vWorldPosition.y));
+      } else {
+        localUv = vec2(fract(vWorldPosition.z), fract(vWorldPosition.y));
+      }
+    } else {
+      if (vWorldNormal.z > 0.0) {
+        localUv = vec2(fract(vWorldPosition.x), fract(vWorldPosition.y));
+      } else {
+        localUv = vec2(1.0 - fract(vWorldPosition.x), fract(vWorldPosition.y));
+      }
+    }
+    
+    vec2 cellMin = floor(vMapUv / cellSize) * cellSize;
+    vec2 innerMin = cellMin + padding;
+    float innerSize = cellSize - padding * 2.0;
+    finalUv = innerMin + localUv * innerSize;
+  } else {
+    finalUv = vMapUv;
+  }
+  
+  
+  vec4 sampledDiffuseColor = texture2D(map, finalUv);
+  #ifdef DECODE_VIDEO_TEXTURE
+    sampledDiffuseColor = vec4(mix(pow(sampledDiffuseColor.rgb * 0.9478672986 + vec3(0.0521327014), vec3(2.4)), sampledDiffuseColor.rgb * 0.0773993808, vec3(lessThanEqual(sampledDiffuseColor.rgb, vec3(0.04045)))), sampledDiffuseColor.w);
+  #endif
+  
+  if (uShowGreedyDebug > 0.5) {
+    if (vIsGreedy > 0.5) {
+      sampledDiffuseColor.rgb = mix(sampledDiffuseColor.rgb, vec3(0.0, 1.0, 0.0), 0.4);
+    } else {
+      sampledDiffuseColor.rgb = mix(sampledDiffuseColor.rgb, vec3(1.0, 0.0, 0.0), 0.4);
+    }
+  }
+  
+  diffuseColor *= sampledDiffuseColor;
+#endif
 `
     )
     .replace(
@@ -82,15 +153,17 @@ s -= s * exp(-s) * 0.02; // Optimized smoothing with adjusted intensity
 
 // Applying adjusted light intensity
 outgoingLight.rgb *= s + pow(vLight.rgb * uLightIntensityAdjustment, vec3(scale));
-outgoingLight *= vAO;
+
+// Apply AO with reduced impact for fluids
+float aoFactor = mix(vAO, 1.0, vIsFluid * 0.8);
+outgoingLight *= aoFactor;
 `
     )
     .replace(
       "#include <fog_fragment>",
       `
-    vec3 fogOrigin = cameraPosition;
-
-    float depth = sqrt(pow(vWorldPosition.x - fogOrigin.x, 2.0) + pow(vWorldPosition.z - fogOrigin.z, 2.0));
+    vec2 fogDiff = vWorldPosition.xz - cameraPosition.xz;
+    float depth = sqrt(dot(fogDiff, fogDiff));
     float fogFactor = smoothstep(uFogNear, uFogFar, depth);
 
     gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);

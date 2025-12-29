@@ -1,18 +1,27 @@
+import { createRequire } from "module";
 import path from "path";
+import { fileURLToPath } from "url";
 
 import { defineConfig } from "vite";
 import { copy } from "vite-plugin-copy";
 import { externalizeDeps } from "vite-plugin-externalize-deps";
 import glsl from "vite-plugin-glsl";
 import stringReplace from "vite-plugin-string-replace";
+import wasm from "vite-plugin-wasm";
+import topLevelAwait from "vite-plugin-top-level-await";
 
-import { version } from "./package.json";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+const { version } = require("./package.json");
 
 export default defineConfig({
   plugins: [
+    wasm(),
+    topLevelAwait(),
     glsl(),
     externalizeDeps({
-      except: [/three\/examples\//],
+      except: [/three\/examples\//, /@voxelize\/wasm-mesher/],
     }),
     stringReplace([
       {
@@ -27,11 +36,10 @@ export default defineConfig({
       },
     ]),
   ],
-  base: "./", // needed to make web workers work: https://github.com/vitejs/vite/discussions/15547#discussioncomment-8950765
+  base: "./",
   build: {
     minify: false,
     lib: {
-      // Could also be a dictionary or array of multiple entry points
       entry: path.resolve(__dirname, "src/index.ts"),
       name: "index",
       formats: ["es", "cjs"],
@@ -41,5 +49,9 @@ export default defineConfig({
     },
     rollupOptions: {},
     emptyOutDir: process.env.NODE_ENV === "production",
+  },
+  worker: {
+    format: "es",
+    plugins: () => [wasm(), topLevelAwait()],
   },
 });

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use hashbrown::{HashMap, HashSet};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
@@ -61,14 +63,14 @@ pub struct Space {
     /// A set of sub-chunks that have been updated.
     pub updated_levels: HashSet<u32>,
 
-    /// A map of voxels, chunk coordinates -> n-dims array of voxels.
-    voxels: HashMap<Vec2<i32>, Ndarray<u32>>,
+    /// A map of voxels, chunk coordinates -> n-dims array of voxels (Arc for cheap cloning).
+    voxels: HashMap<Vec2<i32>, Arc<Ndarray<u32>>>,
 
-    /// A map of lights, chunk coordinates -> n-dims array of lights.
+    /// A map of lights, chunk coordinates -> n-dims array of lights (owned for mutation during light propagation).
     lights: HashMap<Vec2<i32>, Ndarray<u32>>,
 
-    /// A map of height maps, chunk coordinates -> n-dims array of height maps.
-    height_maps: HashMap<Vec2<i32>, Ndarray<u32>>,
+    /// A map of height maps, chunk coordinates -> n-dims array of height maps (Arc for cheap cloning).
+    height_maps: HashMap<Vec2<i32>, Arc<Ndarray<u32>>>,
 }
 
 impl Space {
@@ -157,19 +159,19 @@ impl SpaceBuilder<'_> {
 
                 if let Some(chunk) = self.chunks.raw(&n_coords) {
                     let voxels = if self.needs_voxels {
-                        Some((n_coords.clone(), chunk.voxels.clone()))
+                        Some((n_coords.clone(), Arc::clone(&chunk.voxels)))
                     } else {
                         None
                     };
 
                     let lights = if self.needs_lights {
-                        Some((n_coords.clone(), chunk.lights.clone()))
+                        Some((n_coords.clone(), (*chunk.lights).clone()))
                     } else {
                         Some((n_coords.clone(), ndarray(&chunk.lights.shape, 0)))
                     };
 
                     let height_maps = if self.needs_height_maps {
-                        Some((n_coords.clone(), chunk.height_map.clone()))
+                        Some((n_coords.clone(), Arc::clone(&chunk.height_map)))
                     } else {
                         None
                     };
@@ -381,5 +383,49 @@ impl VoxelAccess for Space {
             && (self.lights.contains_key(&coords)
                 || self.voxels.contains_key(&coords)
                 || self.height_maps.contains_key(&coords))
+    }
+}
+
+impl voxelize_core::VoxelAccess for Space {
+    fn get_voxel(&self, vx: i32, vy: i32, vz: i32) -> u32 {
+        VoxelAccess::get_voxel(self, vx, vy, vz)
+    }
+
+    fn get_raw_voxel(&self, vx: i32, vy: i32, vz: i32) -> u32 {
+        VoxelAccess::get_raw_voxel(self, vx, vy, vz)
+    }
+
+    fn get_voxel_rotation(&self, vx: i32, vy: i32, vz: i32) -> BlockRotation {
+        VoxelAccess::get_voxel_rotation(self, vx, vy, vz)
+    }
+
+    fn get_voxel_stage(&self, vx: i32, vy: i32, vz: i32) -> u32 {
+        VoxelAccess::get_voxel_stage(self, vx, vy, vz)
+    }
+
+    fn get_sunlight(&self, vx: i32, vy: i32, vz: i32) -> u32 {
+        VoxelAccess::get_sunlight(self, vx, vy, vz)
+    }
+
+    fn get_torch_light(&self, vx: i32, vy: i32, vz: i32, color: voxelize_core::LightColor) -> u32 {
+        match color {
+            voxelize_core::LightColor::Red => VoxelAccess::get_red_light(self, vx, vy, vz),
+            voxelize_core::LightColor::Green => VoxelAccess::get_green_light(self, vx, vy, vz),
+            voxelize_core::LightColor::Blue => VoxelAccess::get_blue_light(self, vx, vy, vz),
+            voxelize_core::LightColor::Sunlight => VoxelAccess::get_sunlight(self, vx, vy, vz),
+        }
+    }
+
+    fn get_all_lights(&self, vx: i32, vy: i32, vz: i32) -> (u32, u32, u32, u32) {
+        let raw = VoxelAccess::get_raw_light(self, vx, vy, vz);
+        LightUtils::extract_all(raw)
+    }
+
+    fn get_max_height(&self, vx: i32, vz: i32) -> u32 {
+        VoxelAccess::get_max_height(self, vx, vz)
+    }
+
+    fn contains(&self, vx: i32, vy: i32, vz: i32) -> bool {
+        VoxelAccess::contains(self, vx, vy, vz)
     }
 }

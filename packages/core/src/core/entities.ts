@@ -12,9 +12,6 @@ export class Entity<T = any> extends Group {
     this.entId = id;
   }
 
-  /**
-   * Called when the entity is created.
-   */
   onCreate: (data: T) => void;
 
   onUpdate: (data: T) => void;
@@ -58,12 +55,6 @@ export class Entities extends Group implements NetIntercept {
     (new (id: string) => Entity) | ((id: string) => Entity)
   > = new Map();
 
-  /**
-   * Set a new entity type to the entities manager.
-   *
-   * @param type The type of entity to register.
-   * @param entity The entity class to register.
-   */
   setClass = (
     type: string,
     entity: (new (id: string) => Entity) | ((id: string) => Entity)

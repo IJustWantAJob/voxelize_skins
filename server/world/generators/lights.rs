@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{
-    Block, ChunkUtils, LightColor, Registry, Vec2, Vec3, VoxelAccess, WorldConfig,
-};
+use crate::{Block, ChunkUtils, LightColor, Registry, Vec2, Vec3, VoxelAccess, WorldConfig};
 
 pub const VOXEL_NEIGHBORS: [[i32; 3]; 6] = [
     [1, 0, 0],
@@ -110,16 +108,16 @@ impl Lights {
                 let n_block = registry.get_block_by_id(space.get_voxel(nvx, nvy, nvz));
                 let rotation = space.get_voxel_rotation(nvx, nvy, nvz);
                 let n_transparency = n_block.get_rotated_transparency(&rotation);
-                let next_level = level
-                    - if is_sunlight
-                        && !n_block.light_reduce
-                        && *oy == -1
-                        && level == *max_light_level
-                    {
-                        0
-                    } else {
-                        1
-                    };
+                let reduce = if is_sunlight
+                    && !n_block.light_reduce
+                    && *oy == -1
+                    && level == *max_light_level
+                {
+                    0
+                } else {
+                    1
+                };
+                let next_level = level.saturating_sub(reduce);
 
                 // To not continue:
                 // (1) Light cannot be flooded from source block to neighbor.
@@ -300,30 +298,30 @@ impl Lights {
                         || green_light_level > 0
                         || blue_light_level > 0
                     {
-                    if red_light_level > 0 {
-                        space.set_red_light(x + start_x, y, z + start_z, red_light_level);
-                        red_light_queue.push_back(LightNode {
-                            voxel: [x + start_x, y, z + start_z],
-                            level: red_light_level,
-                        });
-                    }
-                    if green_light_level > 0 {
-                        space.set_green_light(x + start_x, y, z + start_z, green_light_level);
-                        green_light_queue.push_back(LightNode {
-                            voxel: [x + start_x, y, z + start_z],
-                            level: green_light_level,
-                        });
-                    }
-                    if blue_light_level > 0 {
-                        space.set_blue_light(x + start_x, y, z + start_z, blue_light_level);
-                        blue_light_queue.push_back(LightNode {
-                            voxel: [x + start_x, y, z + start_z],
-                            level: blue_light_level,
-                        });
-                    }
+                        if red_light_level > 0 {
+                            space.set_red_light(x + start_x, y, z + start_z, red_light_level);
+                            red_light_queue.push_back(LightNode {
+                                voxel: [x + start_x, y, z + start_z],
+                                level: red_light_level,
+                            });
+                        }
+                        if green_light_level > 0 {
+                            space.set_green_light(x + start_x, y, z + start_z, green_light_level);
+                            green_light_queue.push_back(LightNode {
+                                voxel: [x + start_x, y, z + start_z],
+                                level: green_light_level,
+                            });
+                        }
+                        if blue_light_level > 0 {
+                            space.set_blue_light(x + start_x, y, z + start_z, blue_light_level);
+                            blue_light_queue.push_back(LightNode {
+                                voxel: [x + start_x, y, z + start_z],
+                                level: blue_light_level,
+                            });
+                        }
                     }
 
-                    let index = (x + z * shape.2) as usize;
+                    let index = (x + z * shape.0) as usize;
 
                     let [px, py, pz, nx, ny, nz] = space
                         .get_voxel_rotation(x + start_x, y, z + start_z)
@@ -357,13 +355,13 @@ impl Lights {
 
                             if mask[index] == max_light_level {
                                 if (x < shape.0 - 1
-                                    && mask[(x + 1 + z * shape.2) as usize] == 0
+                                    && mask[(x + 1 + z * shape.0) as usize] == 0
                                     && px)
-                                    || (x > 0 && mask[(x - 1 + z * shape.2) as usize] == 0 && nx)
+                                    || (x > 0 && mask[(x - 1 + z * shape.0) as usize] == 0 && nx)
                                     || (z < shape.2 - 1
-                                        && mask[(x + (z + 1) * shape.2) as usize] == 0
+                                        && mask[(x + (z + 1) * shape.0) as usize] == 0
                                         && pz)
-                                    || (z > 0 && mask[(x + (z - 1) * shape.2) as usize] == 0 && nz)
+                                    || (z > 0 && mask[(x + (z - 1) * shape.0) as usize] == 0 && nz)
                                 {
                                     space.set_sunlight(
                                         x + start_x,

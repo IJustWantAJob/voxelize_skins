@@ -104,20 +104,19 @@ export class SharedWorkerPool {
       const { message, buffers, resolve } =
         this.queue.shift() as SharedWorkerPoolJob;
 
-      worker.port.postMessage(message, buffers || []);
-      SharedWorkerPool.WORKING_COUNT++;
-
       const workerCallback = ({ data }: any) => {
         SharedWorkerPool.WORKING_COUNT--;
         worker.port.removeEventListener("message", workerCallback);
         this.available.push(index);
         resolve(data);
         if (this.queue.length !== 0 && this.available.length > 0) {
-          setTimeout(this.process, 0);
+          queueMicrotask(this.process);
         }
       };
 
       worker.port.addEventListener("message", workerCallback);
+      worker.port.postMessage(message, buffers || []);
+      SharedWorkerPool.WORKING_COUNT++;
     }
   };
 
@@ -133,5 +132,12 @@ export class SharedWorkerPool {
    */
   get workingCount() {
     return this.workers.length - this.available.length;
+  }
+
+  /**
+   * The number of workers that are available to take jobs.
+   */
+  get availableCount() {
+    return this.available.length;
   }
 }

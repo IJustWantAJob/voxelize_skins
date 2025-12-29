@@ -5,308 +5,19 @@ use std::{
     sync::Arc,
 };
 
-use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockUtils, LightColor, LightUtils, Registry, Vec2, Vec3, VoxelAccess, VoxelUpdate, AABB, UV,
+    AABBBuilder, BlockUtils, FluidConfig, LightColor, LightUtils, Registry, Vec2, Vec3,
+    VoxelAccess, VoxelUpdate, AABB, UV,
 };
 
-/// Base class to extract voxel data from a single u32
-///
-/// Bit lineup as such (from right to left):
-/// - `1 - 16 bits`: ID (0x0000FFFF)
-/// - `17 - 20 bit`: rotation (0x000F0000)
-/// - `21 - 24 bit`: y rotation (0x00F00000)
-/// - `25 - 32 bit`: stage (0x0F000000)
+use super::fluids::create_fluid_active_fn;
 
-pub const PY_ROTATION: u32 = 0;
-pub const NY_ROTATION: u32 = 1;
-pub const PX_ROTATION: u32 = 2;
-pub const NX_ROTATION: u32 = 3;
-pub const PZ_ROTATION: u32 = 4;
-pub const NZ_ROTATION: u32 = 5;
-
-pub const Y_ROT_SEGMENTS: u32 = 16;
-
-pub const ROTATION_MASK: u32 = 0xFFF0FFFF;
-pub const Y_ROTATION_MASK: u32 = 0xFF0FFFFF;
-pub const STAGE_MASK: u32 = 0xF0FFFFFF;
-
-/// Block rotation enumeration. There are 6 possible rotations: `(px, nx, py, ny, pz, nz)`. Default rotation is PY.
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub enum BlockRotation {
-    PX(f32),
-    NX(f32),
-    PY(f32),
-    NY(f32),
-    PZ(f32),
-    NZ(f32),
-}
-
-impl Default for BlockRotation {
-    fn default() -> Self {
-        BlockRotation::PY(0.0)
-    }
-}
-
-const PI: f32 = f32::consts::PI;
-const PI_2: f32 = f32::consts::PI / 2.0;
-
-impl BlockRotation {
-    /// Encode a set of rotations into a `BlockRotation` instance.
-    pub fn encode(value: u32, y_rotation: u32) -> Self {
-        let y_rotation = y_rotation as f32 * PI * 2.0 / Y_ROT_SEGMENTS as f32;
-
-        match value {
-            PX_ROTATION => BlockRotation::PX(y_rotation),
-            NX_ROTATION => BlockRotation::NX(y_rotation),
-            PY_ROTATION => BlockRotation::PY(y_rotation),
-            NY_ROTATION => BlockRotation::NY(y_rotation),
-            PZ_ROTATION => BlockRotation::PZ(y_rotation),
-            NZ_ROTATION => BlockRotation::NZ(y_rotation),
-            _ => panic!("Unknown rotation: {}", value),
-        }
-    }
-
-    /// Decode a set of rotations from a `BlockRotation` instance.
-    pub fn decode(rotation: &Self) -> (u32, u32) {
-        let convert_y_rot = |val: f32| {
-            let val = val * Y_ROT_SEGMENTS as f32 / (PI * 2.0);
-            (val.round() as u32) % Y_ROT_SEGMENTS
-        };
-
-        match rotation {
-            BlockRotation::PX(rot) => (PX_ROTATION, convert_y_rot(*rot)),
-            BlockRotation::NX(rot) => (NX_ROTATION, convert_y_rot(*rot)),
-            BlockRotation::PY(rot) => (PY_ROTATION, convert_y_rot(*rot)),
-            BlockRotation::NY(rot) => (NY_ROTATION, convert_y_rot(*rot)),
-            BlockRotation::PZ(rot) => (PZ_ROTATION, convert_y_rot(*rot)),
-            BlockRotation::NZ(rot) => (NZ_ROTATION, convert_y_rot(*rot)),
-        }
-    }
-
-    /// Rotate a 3D position with this block rotation.
-    pub fn rotate_node(&self, node: &mut [f32; 3], y_rotate: bool, translate: bool) {
-        let rot = match self {
-            BlockRotation::PX(rot) => rot,
-            BlockRotation::NX(rot) => rot,
-            BlockRotation::PY(rot) => rot,
-            BlockRotation::NY(rot) => rot,
-            BlockRotation::PZ(rot) => rot,
-            BlockRotation::NZ(rot) => rot,
-        };
-
-        if y_rotate && (*rot).abs() > f32::EPSILON {
-            node[0] -= 0.5;
-            node[2] -= 0.5;
-            self.rotate_y(node, *rot);
-            node[0] += 0.5;
-            node[2] += 0.5;
-        }
-
-        match self {
-            BlockRotation::PX(_) => {
-                self.rotate_z(node, -PI_2);
-
-                if translate {
-                    node[1] += 1.0;
-                }
-            }
-            BlockRotation::NX(_) => {
-                self.rotate_z(node, PI_2);
-
-                if translate {
-                    node[0] += 1.0;
-                }
-            }
-            BlockRotation::PY(_) => {}
-            BlockRotation::NY(_) => {
-                self.rotate_x(node, PI_2 * 2.0);
-
-                if translate {
-                    node[1] += 1.0;
-                    node[2] += 1.0;
-                }
-            }
-            BlockRotation::PZ(_) => {
-                self.rotate_x(node, PI_2);
-
-                if translate {
-                    node[1] += 1.0;
-                }
-            }
-            BlockRotation::NZ(_) => {
-                self.rotate_x(node, -PI_2);
-
-                if translate {
-                    node[2] += 1.0;
-                }
-            }
-        }
-    }
-
-    /// Rotate an AABB.
-    pub fn rotate_aabb(&self, aabb: &AABB, y_rotate: bool, translate: bool) -> AABB {
-        let mut min = [aabb.min_x, aabb.min_y, aabb.min_z];
-        let mut max = [aabb.max_x, aabb.max_y, aabb.max_z];
-
-        let mut min_x = None;
-        let mut min_z = None;
-        let mut max_x = None;
-        let mut max_z = None;
-
-        if y_rotate
-            && (matches!(self, BlockRotation::PY(_)) || matches!(self, BlockRotation::NY(_)))
-        {
-            let min1 = [aabb.min_x, aabb.min_y, aabb.min_z];
-            let min2 = [aabb.min_x, aabb.min_y, aabb.max_z];
-            let min3 = [aabb.max_x, aabb.min_y, aabb.min_z];
-            let min4 = [aabb.max_x, aabb.min_y, aabb.max_z];
-
-            [min1, min2, min3, min4].into_iter().for_each(|mut node| {
-                self.rotate_node(&mut node, true, true);
-
-                if min_x.is_none() || node[0] < min_x.unwrap() {
-                    min_x = Some(node[0]);
-                }
-
-                if min_z.is_none() || node[2] < min_z.unwrap() {
-                    min_z = Some(node[2]);
-                }
-            });
-
-            let max1 = [aabb.min_x, aabb.max_y, aabb.min_z];
-            let max2 = [aabb.min_x, aabb.max_y, aabb.max_z];
-            let max3 = [aabb.max_x, aabb.max_y, aabb.min_z];
-            let max4 = [aabb.max_x, aabb.max_y, aabb.max_z];
-
-            [max1, max2, max3, max4].into_iter().for_each(|mut node| {
-                self.rotate_node(&mut node, true, true);
-
-                if max_x.is_none() || node[0] > max_x.unwrap() {
-                    max_x = Some(node[0]);
-                }
-
-                if max_z.is_none() || node[2] > max_z.unwrap() {
-                    max_z = Some(node[2]);
-                }
-            });
-        }
-
-        self.rotate_node(&mut min, false, translate);
-        self.rotate_node(&mut max, false, translate);
-
-        AABB {
-            min_x: min_x.unwrap_or(min[0].min(max[0])),
-            min_y: min[1].min(max[1]),
-            min_z: min_z.unwrap_or(min[2].min(max[2])),
-            max_x: max_x.unwrap_or(min[0].max(max[0])),
-            max_y: max[1].max(min[1]),
-            max_z: max_z.unwrap_or(min[2].max(max[2])),
-        }
-    }
-
-    /// Rotate transparency, let math do the work.
-    pub fn rotate_transparency(&self, [px, py, pz, nx, ny, nz]: [bool; 6]) -> [bool; 6] {
-        if let BlockRotation::PY(rot) = self {
-            if rot.abs() < f32::EPSILON {
-                return [px, py, pz, nx, ny, nz];
-            }
-        }
-
-        let mut positive = [1.0, 2.0, 3.0];
-        let mut negative = [4.0, 5.0, 6.0];
-
-        self.rotate_node(&mut positive, true, false);
-        self.rotate_node(&mut negative, true, false);
-
-        let p: Vec<bool> = positive
-            .into_iter()
-            .map(|n| {
-                if n == 1.0 {
-                    px
-                } else if n == 2.0 {
-                    py
-                } else if n == 3.0 {
-                    pz
-                } else if n == 4.0 {
-                    nx
-                } else if n == 5.0 {
-                    ny
-                } else {
-                    nz
-                }
-            })
-            .collect();
-
-        let n: Vec<bool> = negative
-            .into_iter()
-            .map(|n| {
-                if n == 1.0 {
-                    px
-                } else if n == 2.0 {
-                    py
-                } else if n == 3.0 {
-                    pz
-                } else if n == 4.0 {
-                    nx
-                } else if n == 5.0 {
-                    ny
-                } else {
-                    nz
-                }
-            })
-            .collect();
-
-        [p[0], p[1], p[2], n[0], n[1], n[2]]
-    }
-
-    // Learned from
-    // https://www.khanacademy.org/computer-programming/cube-rotated-around-x-y-and-z/4930679668473856
-
-    /// Rotate a node on the x-axis.
-    fn rotate_x(&self, node: &mut [f32; 3], theta: f32) {
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-
-        let y = node[1];
-        let z = node[2];
-
-        node[1] = y * cos_theta - z * sin_theta;
-        node[2] = z * cos_theta + y * sin_theta;
-    }
-
-    /// Rotate a node on the y-axis.
-    fn rotate_y(&self, node: &mut [f32; 3], theta: f32) {
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-
-        let x = node[0];
-        let z = node[2];
-
-        node[0] = x * cos_theta + z * sin_theta;
-        node[2] = z * cos_theta - x * sin_theta;
-    }
-
-    /// Rotate a node on the z-axis.
-    fn rotate_z(&self, node: &mut [f32; 3], theta: f32) {
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-
-        let x = node[0];
-        let y = node[1];
-
-        node[0] = x * cos_theta - y * sin_theta;
-        node[1] = y * cos_theta + x * sin_theta;
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CornerData {
-    pub pos: [f32; 3],
-    pub uv: [f32; 2],
-}
+pub use voxelize_core::{
+    BlockRotation, CornerData, NX_ROTATION, NY_ROTATION, NZ_ROTATION, PX_ROTATION, PY_ROTATION,
+    PZ_ROTATION, ROTATION_MASK, STAGE_MASK, Y_ROTATION_MASK, Y_ROT_SEGMENTS,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +25,7 @@ pub struct BlockFace {
     pub name: String,
     pub independent: bool,
     pub isolated: bool,
+    pub texture_group: Option<String>,
     pub dir: [i32; 3],
     pub corners: [CornerData; 4],
     pub range: UV,
@@ -331,6 +43,7 @@ impl BlockFace {
             name,
             independent,
             isolated,
+            texture_group: None,
             dir,
             corners,
             range: UV::default(),
@@ -343,6 +56,33 @@ impl BlockFace {
 
     pub fn into_isolated(&mut self) {
         self.isolated = true;
+    }
+
+    pub fn set_texture_group(&mut self, group: &str) {
+        self.texture_group = Some(group.to_string());
+    }
+
+    pub fn to_mesher_face(&self) -> voxelize_mesher::BlockFace {
+        voxelize_mesher::BlockFace {
+            name: self.name.clone(),
+            name_lower: self.name.to_lowercase(),
+            independent: self.independent,
+            isolated: self.isolated,
+            texture_group: self.texture_group.clone(),
+            dir: self.dir,
+            corners: [
+                voxelize_mesher::CornerData { pos: self.corners[0].pos, uv: self.corners[0].uv },
+                voxelize_mesher::CornerData { pos: self.corners[1].pos, uv: self.corners[1].uv },
+                voxelize_mesher::CornerData { pos: self.corners[2].pos, uv: self.corners[2].uv },
+                voxelize_mesher::CornerData { pos: self.corners[3].pos, uv: self.corners[3].uv },
+            ],
+            range: voxelize_mesher::UV {
+                start_u: self.range.start_u,
+                end_u: self.range.end_u,
+                start_v: self.range.start_v,
+                end_v: self.range.end_v,
+            },
+        }
     }
 }
 
@@ -448,6 +188,7 @@ pub struct DiagonalFacesBuilder {
     suffix: String,
     concat: String,
     to_four: bool,
+    texture_group: Option<String>,
 }
 
 impl DiagonalFacesBuilder {
@@ -463,6 +204,7 @@ impl DiagonalFacesBuilder {
             suffix: "".to_string(),
             concat: "".to_string(),
             to_four: false,
+            texture_group: None,
         }
     }
 
@@ -519,6 +261,11 @@ impl DiagonalFacesBuilder {
         self
     }
 
+    pub fn texture_group(mut self, group: &str) -> Self {
+        self.texture_group = Some(group.to_string());
+        self
+    }
+
     /// Build the diagonal faces.
     pub fn build(self) -> BlockFaces {
         let Self {
@@ -531,6 +278,7 @@ impl DiagonalFacesBuilder {
             suffix,
             concat,
             to_four,
+            texture_group,
         } = self;
 
         let make_name = |side: &str| {
@@ -561,6 +309,7 @@ impl DiagonalFacesBuilder {
                     dir: [0, 0, 0],
                     independent: false,
                     isolated: false,
+                    texture_group: texture_group.clone(),
                     range: UV::default(),
                     corners: [
                         CornerData {
@@ -598,6 +347,7 @@ impl DiagonalFacesBuilder {
                     dir: [0, 0, 0],
                     independent: false,
                     isolated: false,
+                    texture_group: texture_group.clone(),
                     range: UV::default(),
                     corners: [
                         CornerData {
@@ -635,6 +385,7 @@ impl DiagonalFacesBuilder {
                     dir: [0, 0, 0],
                     independent: false,
                     isolated: false,
+                    texture_group: texture_group.clone(),
                     range: UV::default(),
                     corners: [
                         CornerData {
@@ -672,6 +423,7 @@ impl DiagonalFacesBuilder {
                     dir: [0, 0, 0],
                     independent: false,
                     isolated: false,
+                    texture_group: texture_group.clone(),
                     range: UV::default(),
                     corners: [
                         CornerData {
@@ -712,6 +464,7 @@ impl DiagonalFacesBuilder {
                     dir: [0, 0, 0],
                     independent: false,
                     isolated: false,
+                    texture_group: texture_group.clone(),
                     range: UV::default(),
                     corners: [
                         CornerData {
@@ -745,6 +498,7 @@ impl DiagonalFacesBuilder {
                     dir: [0, 0, 0],
                     independent: false,
                     isolated: false,
+                    texture_group,
                     range: UV::default(),
                     corners: [
                         CornerData {
@@ -796,6 +550,7 @@ pub struct SixFacesBuilder {
     concat: String,
     independence: [bool; 6],
     isolation: [bool; 6],
+    texture_groups: [Option<String>; 6],
     auto_uv_offset: bool,
     rotation: Option<BlockRotation>,
 }
@@ -821,6 +576,7 @@ impl SixFacesBuilder {
             concat: "".to_owned(),
             independence: [false, false, false, false, false, false],
             isolation: [false, false, false, false, false, false],
+            texture_groups: [None, None, None, None, None, None],
             auto_uv_offset: false,
             rotation: None,
         }
@@ -944,6 +700,28 @@ impl SixFacesBuilder {
         self
     }
 
+    pub fn texture_group(mut self, group: &str) -> Self {
+        let group = Some(group.to_string());
+        self.texture_groups = [
+            group.clone(),
+            group.clone(),
+            group.clone(),
+            group.clone(),
+            group.clone(),
+            group,
+        ];
+        self
+    }
+
+    pub fn texture_group_at(mut self, index: usize, group: &str) -> Self {
+        if index >= self.texture_groups.len() {
+            return self;
+        }
+
+        self.texture_groups[index] = Some(group.to_string());
+        self
+    }
+
     /// Create the six faces of a block.
     pub fn build(self) -> BlockFaces {
         let Self {
@@ -966,6 +744,7 @@ impl SixFacesBuilder {
             rotation,
             independence,
             isolation,
+            texture_groups,
         } = self;
 
         let make_name = |side: &str| {
@@ -1019,12 +798,15 @@ impl SixFacesBuilder {
         let is_pz_isolated = isolation[SIX_FACES_PZ];
         let is_nz_isolated = isolation[SIX_FACES_NZ];
 
+        let [px_group, py_group, pz_group, nx_group, ny_group, nz_group] = texture_groups;
+
         let mut results = BlockFaces::from_faces(vec![
             BlockFace {
                 name: make_name("px"),
                 dir: [1, 0, 0],
                 independent: is_px_independent,
                 isolated: is_px_isolated,
+                texture_group: px_group,
                 range: UV::default(),
                 corners: [
                     CornerData {
@@ -1073,6 +855,7 @@ impl SixFacesBuilder {
                 dir: [0, 1, 0],
                 independent: is_py_independent,
                 isolated: is_py_isolated,
+                texture_group: py_group,
                 range: UV::default(),
                 corners: [
                     CornerData {
@@ -1121,6 +904,7 @@ impl SixFacesBuilder {
                 dir: [0, 0, 1],
                 independent: is_pz_independent,
                 isolated: is_pz_isolated,
+                texture_group: pz_group,
                 range: UV::default(),
                 corners: [
                     CornerData {
@@ -1169,6 +953,7 @@ impl SixFacesBuilder {
                 dir: [-1, 0, 0],
                 independent: is_nx_independent,
                 isolated: is_nx_isolated,
+                texture_group: nx_group,
                 range: UV::default(),
                 corners: [
                     CornerData {
@@ -1213,6 +998,7 @@ impl SixFacesBuilder {
                 dir: [0, -1, 0],
                 independent: is_ny_independent,
                 isolated: is_ny_isolated,
+                texture_group: ny_group,
                 range: UV::default(),
                 corners: [
                     CornerData {
@@ -1257,6 +1043,7 @@ impl SixFacesBuilder {
                 dir: [0, 0, -1],
                 independent: is_nz_independent,
                 isolated: is_nz_isolated,
+                texture_group: nz_group,
                 range: UV::default(),
                 corners: [
                     CornerData {
@@ -1346,57 +1133,63 @@ impl std::ops::AddAssign<&Self> for BlockFaces {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Neighbors {
     pub center: Vec3<i32>,
-    map: HashMap<Vec3<i32>, [u32; 2]>,
+    data: [[u32; 2]; 27],
 }
 
 impl Neighbors {
+    #[inline]
+    fn offset_to_index(x: i32, y: i32, z: i32) -> usize {
+        ((x + 1) + (y + 1) * 3 + (z + 1) * 9) as usize
+    }
+
     pub fn populate(center: Vec3<i32>, space: &dyn VoxelAccess) -> Self {
-        let mut map = HashMap::new();
-        let Vec3(vx, vy, vz) = center.clone();
+        let mut data = [[0u32; 2]; 27];
+        let Vec3(vx, vy, vz) = center;
 
         for x in -1..=1 {
             for y in -1..=1 {
                 for z in -1..=1 {
-                    let voxel = space.get_raw_voxel(vx + x, vy + y, vz + z);
-                    let light = space.get_raw_light(vx + x, vy + y, vz + z);
-                    map.insert(Vec3(x, y, z), [voxel, light]);
+                    let idx = Self::offset_to_index(x, y, z);
+                    data[idx][0] = space.get_raw_voxel(vx + x, vy + y, vz + z);
+                    data[idx][1] = space.get_raw_light(vx + x, vy + y, vz + z);
                 }
             }
         }
 
-        Self { map, center }
+        Self { data, center }
+    }
+
+    #[inline]
+    fn get_data(&self, offset: &Vec3<i32>) -> [u32; 2] {
+        let idx = Self::offset_to_index(offset.0, offset.1, offset.2);
+        self.data[idx]
     }
 
     pub fn get_voxel(&self, offset: &Vec3<i32>) -> u32 {
-        let value = *self.map.get(offset).unwrap_or(&[0, 0]);
-        BlockUtils::extract_id(value[0])
+        BlockUtils::extract_id(self.get_data(offset)[0])
     }
 
     pub fn get_rotation(&self, offset: &Vec3<i32>) -> BlockRotation {
-        let value = *self.map.get(offset).unwrap_or(&[0, 0]);
-        BlockUtils::extract_rotation(value[0])
+        BlockUtils::extract_rotation(self.get_data(offset)[0])
     }
 
     pub fn get_stage(&self, offset: &Vec3<i32>) -> u32 {
-        let value = *self.map.get(offset).unwrap_or(&[0, 0]);
-        BlockUtils::extract_stage(value[0])
+        BlockUtils::extract_stage(self.get_data(offset)[0])
     }
 
     pub fn get_sunlight(&self, offset: &Vec3<i32>) -> u32 {
-        let value = *self.map.get(offset).unwrap_or(&[0, 0]);
-        LightUtils::extract_sunlight(value[1])
+        LightUtils::extract_sunlight(self.get_data(offset)[1])
     }
 
     pub fn get_torch_light(&self, offset: &Vec3<i32>, color: &LightColor) -> u32 {
-        let value = *self.map.get(offset).unwrap_or(&[0, 0]);
-
+        let light = self.get_data(offset)[1];
         match *color {
-            LightColor::Red => LightUtils::extract_red_light(value[1]),
-            LightColor::Green => LightUtils::extract_green_light(value[1]),
-            LightColor::Blue => LightUtils::extract_blue_light(value[1]),
+            LightColor::Red => LightUtils::extract_red_light(light),
+            LightColor::Green => LightUtils::extract_green_light(light),
+            LightColor::Blue => LightUtils::extract_blue_light(light),
             LightColor::Sunlight => panic!("Getting torch light of Sunlight!"),
         }
     }
@@ -1459,6 +1252,52 @@ pub struct BlockDynamicPattern {
     pub parts: Vec<BlockConditionalPart>,
 }
 
+impl BlockDynamicPattern {
+    pub fn to_mesher_pattern(&self) -> voxelize_mesher::BlockDynamicPattern {
+        voxelize_mesher::BlockDynamicPattern {
+            parts: self.parts.iter().map(|p| p.to_mesher_part()).collect(),
+        }
+    }
+}
+
+impl BlockConditionalPart {
+    pub fn to_mesher_part(&self) -> voxelize_mesher::BlockConditionalPart {
+        voxelize_mesher::BlockConditionalPart {
+            rule: self.rule.to_mesher_rule(),
+            faces: self.faces.iter().map(|f| f.to_mesher_face()).collect(),
+            aabbs: self.aabbs.clone(),
+            is_transparent: self.is_transparent,
+        }
+    }
+}
+
+impl BlockRule {
+    pub fn to_mesher_rule(&self) -> voxelize_mesher::BlockRule {
+        match self {
+            BlockRule::None => voxelize_mesher::BlockRule::None,
+            BlockRule::Simple(simple) => {
+                voxelize_mesher::BlockRule::Simple(voxelize_mesher::BlockSimpleRule {
+                    offset: [simple.offset.0, simple.offset.1, simple.offset.2],
+                    id: simple.id,
+                    rotation: simple.rotation.as_ref().map(|r| {
+                        let (rot, y_rot) = BlockRotation::decode(r);
+                        voxelize_mesher::BlockRotation::encode(rot, y_rot)
+                    }),
+                    stage: simple.stage,
+                })
+            }
+            BlockRule::Combination { logic, rules } => voxelize_mesher::BlockRule::Combination {
+                logic: match logic {
+                    BlockRuleLogic::And => voxelize_mesher::BlockRuleLogic::And,
+                    BlockRuleLogic::Or => voxelize_mesher::BlockRuleLogic::Or,
+                    BlockRuleLogic::Not => voxelize_mesher::BlockRuleLogic::Not,
+                },
+                rules: rules.iter().map(|r| r.to_mesher_rule()).collect(),
+            },
+        }
+    }
+}
+
 /// Serializable struct representing block data.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1482,6 +1321,12 @@ pub struct Block {
 
     /// Is the block a fluid?
     pub is_fluid: bool,
+
+    /// The force applied to entities in this fluid, pushing them in the flow direction.
+    pub fluid_flow_force: f32,
+
+    /// Is this block waterlogged (exists inside water)?
+    pub is_waterlogged: bool,
 
     /// Does the block emit light?
     pub is_light: bool,
@@ -1759,6 +1604,28 @@ impl Block {
     ) -> (Vec<BlockFace>, Vec<AABB>, [bool; 6]) {
         Self::evaluate_dynamic_pattern(&pattern, pos, space)
     }
+
+    pub fn to_mesher_block(&self) -> voxelize_mesher::Block {
+        voxelize_mesher::Block {
+            id: self.id,
+            name: self.name.clone(),
+            name_lower: self.name.to_lowercase(),
+            rotatable: self.rotatable,
+            y_rotatable: self.y_rotatable,
+            is_empty: self.is_empty,
+            is_fluid: self.is_fluid,
+            is_waterlogged: self.is_waterlogged,
+            is_opaque: self.is_opaque,
+            is_see_through: self.is_see_through,
+            is_transparent: self.is_transparent,
+            transparent_standalone: self.transparent_standalone,
+            faces: self.faces.iter().map(|f| f.to_mesher_face()).collect(),
+            aabbs: self.aabbs.clone(),
+            dynamic_patterns: self.dynamic_patterns.as_ref().map(|patterns| {
+                patterns.iter().map(|p| p.to_mesher_pattern()).collect()
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1783,6 +1650,8 @@ pub struct BlockBuilder {
     y_rotatable_segments: YRotatableSegments,
     is_empty: bool,
     is_fluid: bool,
+    fluid_flow_force: f32,
+    is_waterlogged: bool,
     is_passable: bool,
     is_climbable: bool,
     red_light_level: u32,
@@ -1862,6 +1731,18 @@ impl BlockBuilder {
     /// Configure whether or not this is a fluid. Default is false.
     pub fn is_fluid(mut self, is_fluid: bool) -> Self {
         self.is_fluid = is_fluid;
+        self
+    }
+
+    /// Configure the flow force for this fluid block. Default is 0.0.
+    pub fn fluid_flow_force(mut self, fluid_flow_force: f32) -> Self {
+        self.fluid_flow_force = fluid_flow_force;
+        self
+    }
+
+    /// Configure whether or not this block is waterlogged (exists inside water). Default is false.
+    pub fn is_waterlogged(mut self, is_waterlogged: bool) -> Self {
+        self.is_waterlogged = is_waterlogged;
         self
     }
 
@@ -2038,6 +1919,16 @@ impl BlockBuilder {
         self
     }
 
+    pub fn fluid_simulation(mut self, config: FluidConfig) -> Self {
+        let fluid_id = self.id;
+        let (ticker, updater) = create_fluid_active_fn(fluid_id, config);
+
+        self.is_fluid = true;
+        self.active_ticker = Some(Arc::new(move |pos, space, reg| ticker(pos, space, reg)));
+        self.active_updater = Some(Arc::new(move |pos, space, reg| updater(pos, space, reg)));
+        self
+    }
+
     /// Construct a block instance, ready to be added into the registry.
     pub fn build(self) -> Block {
         Block {
@@ -2048,6 +1939,8 @@ impl BlockBuilder {
             y_rotatable_segments: self.y_rotatable_segments,
             is_empty: self.is_empty,
             is_fluid: self.is_fluid,
+            fluid_flow_force: self.fluid_flow_force,
+            is_waterlogged: self.is_waterlogged,
             is_light: self.red_light_level > 0
                 || self.green_light_level > 0
                 || self.blue_light_level > 0,

@@ -2,6 +2,7 @@ mod bookkeeping;
 mod clients;
 mod components;
 mod config;
+pub mod cpu_profiler;
 mod entities;
 mod entity_ids;
 mod events;
@@ -12,7 +13,6 @@ mod metadata;
 mod physics;
 mod profiler;
 mod registry;
-mod search;
 mod stats;
 mod systems;
 mod types;
@@ -20,8 +20,7 @@ mod utils;
 mod voxels;
 
 use actix::{
-    Actor, AsyncContext, Context, Handler, Message as ActixMessage, MessageResult, Recipient,
-    SyncContext,
+    Actor, AsyncContext, Context, Handler, Message as ActixMessage, MessageResult, SyncContext,
 };
 use actix::{Addr, SyncArbiter};
 use hashbrown::HashMap;
@@ -48,8 +47,8 @@ use std::{
 use crate::{
     encode_message,
     protocols::Peer,
-    server::{Message, MessageType},
-    EncodedMessage, EntityOperation, EntityProtocol, PeerProtocol, Server, Vec2, Vec3,
+    server::{Message, MessageType, WsSender},
+    EntityOperation, EntityProtocol, PeerProtocol, Server, Vec2, Vec3,
 };
 
 use super::common::ClientFilter;
@@ -58,6 +57,7 @@ pub use bookkeeping::*;
 pub use clients::*;
 pub use components::*;
 pub use config::*;
+pub use cpu_profiler::*;
 pub use entities::*;
 pub use entity_ids::*;
 pub use events::*;
@@ -66,14 +66,13 @@ pub use interests::*;
 pub use messages::*;
 pub use physics::*;
 pub use registry::*;
-pub use search::*;
 pub use stats::*;
 pub use systems::*;
 pub use types::*;
 pub use utils::*;
 pub use voxels::*;
 
-pub type Transports = HashMap<String, Recipient<EncodedMessage>>;
+pub type Transports = HashMap<String, WsSender>;
 
 /// The default client metadata parser, parses PositionComp and DirectionComp, and updates RigidBodyComp.
 pub fn default_client_parser(world: &mut World, metadata: &str, client_ent: Entity) {
@@ -210,7 +209,7 @@ pub(crate) struct ClientRequest {
 pub(crate) struct ClientJoinRequest {
     pub id: String,
     pub username: String,
-    pub addr: Recipient<EncodedMessage>,
+    pub sender: WsSender,
 }
 
 #[derive(ActixMessage)]
@@ -223,7 +222,7 @@ pub(crate) struct ClientLeaveRequest {
 #[rtype(result = "()")]
 pub(crate) struct TransportJoinRequest {
     pub id: String,
-    pub addr: Recipient<EncodedMessage>,
+    pub sender: WsSender,
 }
 
 #[derive(ActixMessage)]
@@ -303,7 +302,7 @@ impl Handler<ClientJoinRequest> for SyncWorld {
         self.0
             .write()
             .unwrap()
-            .add_client(&msg.id, &msg.username, &msg.addr);
+            .add_client(&msg.id, &msg.username, &msg.sender);
     }
 }
 
@@ -319,7 +318,7 @@ impl Handler<TransportJoinRequest> for SyncWorld {
     type Result = ();
 
     fn handle(&mut self, msg: TransportJoinRequest, _: &mut SyncContext<Self>) {
-        self.0.write().unwrap().add_transport(&msg.id, &msg.addr);
+        self.0.write().unwrap().add_transport(&msg.id, &msg.sender);
     }
 }
 
@@ -346,10 +345,10 @@ fn dispatcher() -> DispatcherBuilder<'static, 'static> {
         )
         .with(ChunkSendingSystem, "chunk-sending", &["chunk-generation"])
         .with(ChunkSavingSystem, "chunk-saving", &["chunk-generation"])
-        .with(PhysicsSystem, "physics", &["current-chunk", "update-stats"])
+        .with(PhysicsSystem, "physics", &["current-chunk", "update-stats", "chunk-updating"])
         .with(DataSavingSystem, "entities-saving", &["entities-meta"])
         .with(
-            EntitiesSendingSystem,
+            EntitiesSendingSystem::default(),
             "entities-sending",
             &["entities-meta"],
         )
@@ -458,7 +457,6 @@ impl World {
             &config.save_dir,
             config.default_time,
         ));
-        ecs.insert(Search::new());
 
         ecs.insert(Mesher::new());
         ecs.insert(Pipeline::new());
@@ -691,12 +689,12 @@ impl World {
         }
     }
 
-    /// Add a transport address to this world.
-    pub(crate) fn add_transport(&mut self, id: &str, addr: &Recipient<EncodedMessage>) {
+    /// Add a transport sender to this world.
+    pub(crate) fn add_transport(&mut self, id: &str, sender: &WsSender) {
         let init_message = self.generate_init_message(id);
-        self.send(addr, &init_message);
+        self.send(sender, &init_message);
         self.write_resource::<Transports>()
-            .insert(id.to_owned(), addr.to_owned());
+            .insert(id.to_owned(), sender.clone());
     }
 
     /// Remove a transport address from this world.
@@ -704,13 +702,8 @@ impl World {
         self.write_resource::<Transports>().remove(id);
     }
 
-    /// Add a client to the world by an ID and an Actix actor address.
-    pub(crate) fn add_client(
-        &mut self,
-        id: &str,
-        username: &str,
-        addr: &Recipient<EncodedMessage>,
-    ) {
+    /// Add a client to the world by an ID and a WebSocket sender.
+    pub(crate) fn add_client(&mut self, id: &str, username: &str, sender: &WsSender) {
         let init_message = self.generate_init_message(id);
 
         let body =
@@ -724,7 +717,7 @@ impl World {
             .with(ClientFlag::default())
             .with(IDComp::new(id))
             .with(NameComp::new(username))
-            .with(AddrComp::new(addr))
+            .with(AddrComp::new(sender))
             .with(ChunkRequestsComp::default())
             .with(CurrentChunkComp::default())
             .with(MetadataComp::default())
@@ -745,13 +738,13 @@ impl World {
                 id: id.to_owned(),
                 entity: ent,
                 username: username.to_owned(),
-                addr: addr.to_owned(),
+                sender: sender.clone(),
             },
         );
 
         self.entity_ids_mut().insert(id.to_owned(), ent.id());
 
-        self.send(addr, &init_message);
+        self.send(sender, &init_message);
 
         let join_message = Message::new(&MessageType::Join).text(id).build();
         self.broadcast(join_message, ClientFilter::All);
@@ -763,6 +756,7 @@ impl World {
     pub(crate) fn remove_client(&mut self, id: &str) {
         let removed = self.clients_mut().remove(id);
         self.entity_ids_mut().remove(id);
+        self.chunk_interest_mut().remove_client(id);
 
         if let Some(client) = removed {
             // Use a flag to track if we need to delete the entity
@@ -937,8 +931,8 @@ impl World {
     }
 
     /// Send a direct message to an endpoint
-    pub fn send(&self, addr: &Recipient<EncodedMessage>, data: &Message) {
-        addr.do_send(EncodedMessage(encode_message(data)));
+    pub fn send(&self, sender: &WsSender, data: &Message) {
+        let _ = sender.send(encode_message(data));
     }
 
     /// Access to the world's config.
@@ -1009,16 +1003,6 @@ impl World {
     /// Access the mutable events queue in the ECS world.
     pub fn events_mut(&mut self) -> FetchMut<Events> {
         self.write_resource::<Events>()
-    }
-
-    /// Access the search tree in the ECS world.
-    pub fn search(&self) -> Fetch<Search> {
-        self.read_resource::<Search>()
-    }
-
-    /// Access the mutable search tree in the ECS world.
-    pub fn search_mut(&mut self) -> FetchMut<Search> {
-        self.write_resource::<Search>()
     }
 
     /// Access the stats manager in the ECS world.
@@ -1313,16 +1297,6 @@ impl World {
                                 self.mesher_mut().add_chunk(&coords, false);
                             }
                         }
-
-                        // drop(chunks);
-
-                        // let is_in_pipeline = self.pipeline().has_chunk(&coords);
-                        // let is_in_mesher = self.mesher().map.contains(&coords);
-
-                        // info!(
-                        //     "Chunk {:?} is not ready. In pipeline: {}, in mesher: {}, status: {:?}",
-                        //     coords, is_in_pipeline, is_in_mesher, status
-                        // );
                     }
                 }
             }
@@ -1474,16 +1448,33 @@ impl World {
         let chunk_size = self.config().chunk_size;
         let mut chunks = self.chunks_mut();
 
-        data.updates.into_iter().for_each(|update| {
-            let coords =
-                ChunkUtils::map_voxel_to_chunk(update.vx, update.vy, update.vz, chunk_size);
+        if let Some(bulk) = data.bulk_update {
+            for i in 0..bulk.vx.len() {
+                let vx = bulk.vx[i];
+                let vy = bulk.vy[i];
+                let vz = bulk.vz[i];
+                let voxel = bulk.voxels[i];
 
-            if !chunks.is_within_world(&coords) {
-                return;
+                let coords = ChunkUtils::map_voxel_to_chunk(vx, vy, vz, chunk_size);
+
+                if !chunks.is_within_world(&coords) {
+                    continue;
+                }
+
+                chunks.update_voxel(&Vec3(vx, vy, vz), voxel);
             }
+        } else {
+            data.updates.into_iter().for_each(|update| {
+                let coords =
+                    ChunkUtils::map_voxel_to_chunk(update.vx, update.vy, update.vz, chunk_size);
 
-            chunks.update_voxel(&Vec3(update.vx, update.vy, update.vz), update.voxel);
-        });
+                if !chunks.is_within_world(&coords) {
+                    return;
+                }
+
+                chunks.update_voxel(&Vec3(update.vx, update.vy, update.vz), update.voxel);
+            });
+        }
     }
 
     /// Handler for `Method` type messages.
@@ -1564,7 +1555,9 @@ impl World {
         if self.config().saving {
             // TODO: THIS FEELS HACKY
 
-            let paths = fs::read_dir(self.read_resource::<EntitiesSaver>().folder.clone()).unwrap();
+            let folder = self.read_resource::<EntitiesSaver>().folder.clone();
+            fs::create_dir_all(&folder).ok();
+            let paths = fs::read_dir(folder).unwrap();
             let mut loaded_entities = HashMap::new();
 
             for path in paths {
@@ -1595,7 +1588,7 @@ impl World {
                         );
 
                     if let Some(ent) = self.revive_entity(&id, &etype, metadata.to_owned()) {
-                        loaded_entities.insert(id.to_owned(), (etype, ent, metadata));
+                        loaded_entities.insert(id.to_owned(), (etype, ent, metadata, true));
                     } else {
                         // Use error! instead of info! for better visibility
                         error!(

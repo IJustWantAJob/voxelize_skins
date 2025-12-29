@@ -222,11 +222,11 @@ export const defaultHeadOptions: HeadOptions = {
   gap: 0.1 * CHARACTER_SCALE,
   layers: 1,
   side: DoubleSide,
-  width: 0.5 * CHARACTER_SCALE,
+  width: 0.8 * CHARACTER_SCALE,  // Minecraft skin: 8 pixels
   widthSegments: 16,
-  height: 0.25 * CHARACTER_SCALE,
-  heightSegments: 8,
-  depth: 0.5 * CHARACTER_SCALE,
+  height: 0.8 * CHARACTER_SCALE,  // Minecraft skin: 8 pixels
+  heightSegments: 16,
+  depth: 0.8 * CHARACTER_SCALE,  // Minecraft skin: 8 pixels
   depthSegments: 16,
   neckGap: 0.05 * CHARACTER_SCALE,
 };
@@ -236,8 +236,12 @@ export const defaultBodyOptions: BodyOptions = {
   gap: 0.1 * CHARACTER_SCALE,
   layers: 1,
   side: DoubleSide,
-  width: 1 * CHARACTER_SCALE,
-  widthSegments: 16,
+  width: 0.4 * CHARACTER_SCALE,  // Minecraft skin: 4 pixels (swapped with depth)
+  widthSegments: 8,
+  height: 1.2 * CHARACTER_SCALE,  // Minecraft skin: 12 pixels (kept as is)
+  heightSegments: 24,
+  depth: 0.8 * CHARACTER_SCALE,  // Minecraft skin: 8 pixels (swapped with width)
+  depthSegments: 16,
 };
 
 export const defaultArmsOptions: ArmsOptions = {
@@ -245,11 +249,11 @@ export const defaultArmsOptions: ArmsOptions = {
   gap: 0.1 * CHARACTER_SCALE,
   layers: 1,
   side: DoubleSide,
-  width: 0.25 * CHARACTER_SCALE,
-  height: 0.5 * CHARACTER_SCALE,
-  depth: 0.25 * CHARACTER_SCALE,
+  width: 0.4 * CHARACTER_SCALE,  // Minecraft skin: 4 pixels
+  height: 1.2 * CHARACTER_SCALE,  // Minecraft skin: 12 pixels
+  depth: 0.4 * CHARACTER_SCALE,  // Minecraft skin: 4 pixels
   widthSegments: 8,
-  heightSegments: 16,
+  heightSegments: 24,
   depthSegments: 8,
   shoulderGap: 0.05 * CHARACTER_SCALE,
   shoulderDrop: 0.25 * CHARACTER_SCALE,
@@ -260,12 +264,12 @@ export const defaultLegsOptions: LegOptions = {
   gap: 0.1 * CHARACTER_SCALE,
   layers: 1,
   side: DoubleSide,
-  width: 0.25 * CHARACTER_SCALE,
-  height: 0.25 * CHARACTER_SCALE,
-  depth: 0.25 * CHARACTER_SCALE,
-  widthSegments: 3,
-  heightSegments: 3,
-  depthSegments: 3,
+  width: 0.4 * CHARACTER_SCALE,  // Minecraft skin: 4 pixels
+  height: 1.2 * CHARACTER_SCALE,  // Minecraft skin: 12 pixels
+  depth: 0.4 * CHARACTER_SCALE,  // Minecraft skin: 4 pixels
+  widthSegments: 8,
+  heightSegments: 24,
+  depthSegments: 8,
   betweenLegsGap: 0.2 * CHARACTER_SCALE,
 };
 

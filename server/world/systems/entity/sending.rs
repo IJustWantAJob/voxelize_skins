@@ -1,13 +1,18 @@
 use hashbrown::{HashMap, HashSet};
-use specs::{Entities, Join, ReadExpect, ReadStorage, System, WriteExpect, WriteStorage};
+use specs::{Entities, Entity, Join, LendJoin, ReadExpect, ReadStorage, System, WriteExpect, WriteStorage};
 
 use crate::{
-    Bookkeeping, ClientFilter, ETypeComp, EntitiesSaver, EntityFlag, EntityIDs, EntityOperation,
-    EntityProtocol, IDComp, InteractorComp, Message, MessageQueue, MessageType, MetadataComp,
-    Physics,
+    Bookkeeping, ClientFilter, DoNotPersistComp, ETypeComp, EntitiesSaver, EntityFlag, EntityIDs,
+    EntityOperation, EntityProtocol, IDComp, InteractorComp, Message, MessageQueue, MessageType,
+    MetadataComp, Physics,
 };
 
-pub struct EntitiesSendingSystem;
+#[derive(Default)]
+pub struct EntitiesSendingSystem {
+    updated_entities_buffer: Vec<(String, Entity)>,
+    entity_updates_buffer: Vec<EntityProtocol>,
+    new_entity_ids_buffer: HashSet<String>,
+}
 
 impl<'a> System<'a> for EntitiesSendingSystem {
     type SystemData = (
@@ -21,6 +26,7 @@ impl<'a> System<'a> for EntitiesSendingSystem {
         ReadStorage<'a, IDComp>,
         ReadStorage<'a, ETypeComp>,
         ReadStorage<'a, InteractorComp>,
+        ReadStorage<'a, DoNotPersistComp>,
         WriteStorage<'a, MetadataComp>,
     );
 
@@ -36,8 +42,13 @@ impl<'a> System<'a> for EntitiesSendingSystem {
             ids,
             etypes,
             interactors,
+            do_not_persist,
             mut metadatas,
         ) = data;
+
+        self.updated_entities_buffer.clear();
+        self.entity_updates_buffer.clear();
+        self.new_entity_ids_buffer.clear();
 
         let mut new_entity_handlers = HashMap::new();
 
@@ -51,47 +62,33 @@ impl<'a> System<'a> for EntitiesSendingSystem {
             );
         }
 
-        let mut updated_entities = vec![];
+        let mut updated_ids: HashSet<&String> = HashSet::new();
 
         for (id, ent, _) in (&ids, &entities, &flags).join() {
-            updated_entities.push((id.0.to_owned(), ent));
+            updated_ids.insert(&id.0);
+            self.updated_entities_buffer.push((id.0.to_owned(), ent));
         }
 
-        let old_entities = bookkeeping
-            .entities
-            .to_owned()
-            .drain()
-            .map(|(id, ent)| (id, ent))
-            .collect::<Vec<_>>();
+        let old_entities = std::mem::take(&mut bookkeeping.entities);
+        let old_ids: HashSet<&String> = old_entities.keys().collect();
 
-        // Differentiating the entities to see which entities are freshly created.
-        let mut entity_updates = Vec::with_capacity(updated_entities.len());
-        let mut new_entity_ids = HashSet::new();
+        let old_entity_handlers = std::mem::take(&mut physics.entity_to_handlers);
 
-        let old_entity_handlers = physics.entity_to_handlers.clone();
-
-        for (id, (etype, ent, metadata)) in old_entities.iter() {
-            let mut found = false;
-
-            for (new_id, _) in &updated_entities {
-                if new_id == id {
-                    found = true;
-                    break;
-                }
-            }
-
-            if found {
+        for (id, (etype, ent, metadata, persisted)) in old_entities.iter() {
+            if updated_ids.contains(id) {
                 continue;
             }
 
-            entities_saver.remove(id);
+            if *persisted {
+                entities_saver.remove(id);
+            }
             entity_ids.remove(id);
 
             if let Some((collider_handle, body_handle)) = old_entity_handlers.get(ent) {
                 physics.unregister(body_handle, collider_handle);
             }
 
-            entity_updates.push(EntityProtocol {
+            self.entity_updates_buffer.push(EntityProtocol {
                 operation: EntityOperation::Delete,
                 id: id.to_owned(),
                 r#type: etype.to_owned(),
@@ -101,41 +98,30 @@ impl<'a> System<'a> for EntitiesSendingSystem {
 
         physics.entity_to_handlers = new_entity_handlers;
 
-        updated_entities
-            .iter()
-            .filter(|(id, _)| {
-                let mut found = false;
-
-                for (old_id, _) in &old_entities {
-                    if old_id == id {
-                        found = true;
-                        break;
-                    }
-                }
-
-                !found
-            })
-            .for_each(|(id, _)| {
-                new_entity_ids.insert(id.to_owned());
-            });
+        for (id, _) in &self.updated_entities_buffer {
+            if !old_ids.contains(id) {
+                self.new_entity_ids_buffer.insert(id.to_owned());
+            }
+        }
 
         let mut new_bookkeeping_records = HashMap::new();
 
-        for (ent, id, metadata, etype, _) in
-            (&entities, &ids, &mut metadatas, &etypes, &flags).join()
+        for (ent, id, metadata, etype, _, do_not_persist) in
+            (&entities, &ids, &mut metadatas, &etypes, &flags, do_not_persist.maybe()).join()
         {
             if metadata.is_empty() {
                 continue;
             }
 
-            // Make sure metadata is not empty before recording it.
+            let persisted = do_not_persist.is_none();
+
             new_bookkeeping_records.insert(
                 id.0.to_owned(),
-                (etype.0.to_owned(), ent, metadata.to_owned()),
+                (etype.0.to_owned(), ent, metadata.to_owned(), persisted),
             );
 
-            if new_entity_ids.contains(&id.0) {
-                entity_updates.push(EntityProtocol {
+            if self.new_entity_ids_buffer.contains(&id.0) {
+                self.entity_updates_buffer.push(EntityProtocol {
                     operation: EntityOperation::Create,
                     id: id.0.to_owned(),
                     r#type: etype.0.to_owned(),
@@ -151,22 +137,20 @@ impl<'a> System<'a> for EntitiesSendingSystem {
                 continue;
             }
 
-            entity_updates.push(EntityProtocol {
+            self.entity_updates_buffer.push(EntityProtocol {
                 operation: EntityOperation::Update,
                 id: id.0.to_owned(),
                 r#type: etype.0.to_owned(),
                 metadata: Some(json_str),
             });
-
-            metadata.reset();
         }
 
         bookkeeping.entities = new_bookkeeping_records;
 
-        if !entity_updates.is_empty() {
+        if !self.entity_updates_buffer.is_empty() {
             queue.push((
                 Message::new(&MessageType::Entity)
-                    .entities(&entity_updates)
+                    .entities(&self.entity_updates_buffer)
                     .build(),
                 ClientFilter::All,
             ));
